@@ -1,0 +1,288 @@
+[gd_scene load_steps=18 format=3 uid="uid://budmx5lt7llpq"]
+
+[ext_resource type="Texture2D" uid="uid://p6rs5eydluxw" path="res://textures/kenney_prototype_textures/red/texture_02.png" id="2_xggu8"]
+[ext_resource type="Texture2D" uid="uid://mmyve2qfcpq7" path="res://textures/kenney_prototype_textures/orange/texture_01.png" id="3_nsc3y"]
+[ext_resource type="Texture2D" uid="uid://defq0ugvgoggq" path="res://textures/kenney_prototype_textures/dark/texture_04.png" id="3_tpxc8"]
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_rb2oc"]
+size = Vector3(1, 0, 1)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_c7g7h"]
+albedo_texture = ExtResource("3_tpxc8")
+
+[sub_resource type="PlaneMesh" id="PlaneMesh_r21e8"]
+material = SubResource("StandardMaterial3D_c7g7h")
+size = Vector2(1, 1)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_brisa"]
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_160yg"]
+albedo_texture = ExtResource("2_xggu8")
+
+[sub_resource type="BoxMesh" id="BoxMesh_1o467"]
+material = SubResource("StandardMaterial3D_160yg")
+
+[sub_resource type="GDScript" id="GDScript_l5o6l"]
+script/source = "extends CharacterBody3D
+
+@onready var Body = get_node(\"Body\")
+@onready var Camera = get_node(\"Camera\")
+@onready var GroundCheck: RayCast3D = get_node(\"GroundCheck\")
+
+# Movement
+const MAX_VELOCITY_AIR = 3
+const MAX_VELOCITY_GROUND = 10.0
+const MAX_ACCELERATION = 5 * MAX_VELOCITY_GROUND
+const GRAVITY = 24
+const STOP_SPEED = 2
+const JUMP_IMPULSE = sqrt(3 * GRAVITY * .9)
+
+const MIN_LAUNCH_SPEED = 20
+const DASH_SPEED_BOOST = 15
+
+var friction = 4
+var airFriction = .01
+var wallFriction = 2
+var direction = Vector3()
+var wish_jump
+var wish_accel
+
+var CameraRotation = Vector3(0.0,0.0,0.0)
+var MouseSensitivity = 0.001
+var shake_rotation = 0 
+var Start_Shake_Rotation = 0
+
+func _ready():
+	Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
+
+func _input(event):
+	if event.is_action_pressed(\"fullScreen\"):
+		if DisplayServer.window_get_mode() == DisplayServer.WINDOW_MODE_MAXIMIZED: DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_WINDOWED)
+		else: DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_MAXIMIZED)
+	
+	if event.is_action_pressed(\"ui_cancel\"):
+		if Input.get_mouse_mode() == Input.MOUSE_MODE_CAPTURED:
+			Input.set_mouse_mode(Input.MOUSE_MODE_VISIBLE)
+		else:
+			Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
+		
+	if event is InputEventMouseMotion:
+		var MouseEvent = event.relative * MouseSensitivity
+		CameraLook(MouseEvent)
+
+func CameraLook(Movement: Vector2):
+	var move = Vector3(Movement.x,Movement.y,0.0)
+	CameraRotation += move
+	
+	transform.basis = Basis()
+	Camera.transform.basis = Basis()
+	
+	rotate_object_local(Vector3(0,1,0),-CameraRotation.x) # first rotate in Y
+	Camera.rotate_object_local(Vector3(1,0,0), -CameraRotation.y) # then rotate in X
+	rotate_object_local(Vector3(0,0,1),-CameraRotation.z)
+	if CameraRotation.x > PI: CameraRotation.x-=2*PI
+	if CameraRotation.x < -PI: CameraRotation.x+=2*PI
+	if CameraRotation.y > PI: CameraRotation.y-=2*PI
+	if CameraRotation.y < -PI: CameraRotation.y+=2*PI
+	if is_on_floor() || !Input.is_action_pressed(\"moveAccel\") || Input.is_action_just_released(\"moveAccel\"): CameraRotation.y = clamp(CameraRotation.y,-PI/2,PI/2)
+	
+func _physics_process(delta):
+	process_input()
+	process_movement(delta)
+
+func process_input():
+	direction = Vector3()
+	
+	# Movement directions
+	if Input.is_action_pressed(\"moveForward\"): direction -= transform.basis.z
+	elif Input.is_action_pressed(\"moveBackward\"): direction += transform.basis.z
+	if Input.is_action_pressed(\"moveLeft\"): direction -= transform.basis.x*2
+	elif Input.is_action_pressed(\"moveRight\"): direction += transform.basis.x*2
+	
+	if direction.z>0: CameraRotation.z = lerp_angle(CameraRotation.z, deg_to_rad(10), 0.05)
+	elif direction.z<0: CameraRotation.z = lerp_angle(CameraRotation.z, deg_to_rad(-10), 0.05)
+	else: CameraRotation.z = lerp_angle(CameraRotation.z, deg_to_rad(10), 0.05)
+	
+	# Dash logic
+	if Input.is_action_just_pressed(\"moveDash\"):
+		if direction.length()==0 || Input.is_action_pressed(\"moveForward\"): velocity = Camera.get_global_transform().basis.z.normalized()*-1*min(velocity.length()+DASH_SPEED_BOOST, MAX_VELOCITY_GROUND*3)
+		elif Input.is_action_pressed(\"moveBackward\"): velocity = Camera.get_global_transform().basis.z.normalized()*min(velocity.length()+DASH_SPEED_BOOST, MAX_VELOCITY_GROUND*3)
+		else: velocity = direction.normalized()*min(velocity.length()+DASH_SPEED_BOOST/4, MAX_VELOCITY_GROUND*3)
+	
+	# Jumping
+	wish_jump = Input.is_action_pressed(\"moveJump\")
+	# special running
+	wish_accel = Input.is_action_pressed(\"moveAccel\")
+
+func process_movement(delta):
+	var wish_dir = direction.normalized()
+	
+	if is_on_floor():
+		if wish_jump:
+			# super jump
+			if wish_accel && sqrt(velocity.x*velocity.x+velocity.z+velocity.z)>MIN_LAUNCH_SPEED: 
+				velocity.y = JUMP_IMPULSE*3
+				wish_accel = false
+			else: velocity.y = JUMP_IMPULSE
+			
+			# Update velocity as if we are in the air
+			velocity = update_velocity_air(wish_dir, delta)
+			wish_jump = false
+		else: velocity = update_velocity_ground(wish_dir, delta)
+	
+	elif !GroundCheck.is_colliding() && is_on_wall_only() && velocity.length()>MIN_LAUNCH_SPEED:
+		if wish_jump:
+			if wish_accel && sqrt(velocity.x*velocity.x+velocity.z+velocity.z)>MIN_LAUNCH_SPEED: 
+				velocity.y = JUMP_IMPULSE*3
+				wish_accel = false
+			else: velocity.y = JUMP_IMPULSE
+			velocity+=get_wall_normal()*DASH_SPEED_BOOST
+		else:
+			velocity.y -=.01
+			velocity = update_velocity_air(wish_dir, delta)
+	
+	else:
+		# Only apply gravity while in the air
+		velocity.y -= GRAVITY * delta
+		velocity = update_velocity_air(wish_dir, delta)
+	
+	# Move the player once velocity has been calculated
+	move_and_slide()
+
+func update_velocity_ground(wish_dir: Vector3, delta):
+	# Apply friction when on the ground and then accelerate
+	var speed = velocity.length()
+	
+	if wish_dir.length() == 0: return velocity*.6
+	
+	# ground friction
+	if speed != 0: velocity *= max(speed - max(STOP_SPEED, speed)*friction*delta, 0) / speed
+	
+	return accelerate(wish_dir, MAX_VELOCITY_GROUND, delta)
+
+func update_velocity_air(wish_dir: Vector3, delta):
+	var speed = velocity.length()
+	# air friction
+	if speed != 0: velocity *= max(speed - max(STOP_SPEED, speed)*airFriction*delta, 0) / speed
+	return accelerate(wish_dir, MAX_VELOCITY_AIR, delta)
+
+func accelerate(wish_dir: Vector3, max_velocity: float, delta):
+	# Get our current speed as a projection of velocity onto the wish_dir
+	var current_speed = velocity.dot(wish_dir)
+	# How much we accelerate is the difference between the max speed and the current speed
+	var add_speed = clamp(max_velocity - current_speed, 0, MAX_ACCELERATION * delta)
+	
+	return velocity + add_speed * wish_dir
+"
+
+[sub_resource type="CapsuleShape3D" id="CapsuleShape3D_wlhci"]
+height = 1.7
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_8ydiv"]
+size = Vector3(20, 5, 1)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_olm7r"]
+albedo_texture = ExtResource("3_tpxc8")
+uv1_scale = Vector3(20, 5, 1)
+
+[sub_resource type="BoxMesh" id="BoxMesh_lu2cy"]
+material = SubResource("StandardMaterial3D_olm7r")
+size = Vector3(20, 5, 1)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_hkm5j"]
+size = Vector3(30, 10, 1)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_wkqp5"]
+albedo_texture = ExtResource("3_nsc3y")
+uv1_scale = Vector3(30, 10, 1)
+
+[sub_resource type="BoxMesh" id="BoxMesh_f6yps"]
+material = SubResource("StandardMaterial3D_wkqp5")
+size = Vector3(30, 10, 1)
+
+[node name="World" type="Node3D"]
+
+[node name="GridMap" type="GridMap" parent="."]
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
+transform = Transform3D(0.707107, -0.65706, -0.26129, 0, -0.36952, 0.929223, -0.707107, -0.65706, -0.26129, 0, 4.78122, 0)
+light_energy = 2.583
+shadow_enabled = true
+
+[node name="Floor" type="StaticBody3D" parent="."]
+transform = Transform3D(100, 0, 0, 0, 100, 0, 0, 0, 100, 0, 0, 0)
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Floor"]
+shape = SubResource("BoxShape3D_rb2oc")
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="Floor"]
+mesh = SubResource("PlaneMesh_r21e8")
+
+[node name="Box" type="RigidBody3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 8, 0)
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Box"]
+transform = Transform3D(3, 0, 0, 0, 3, 0, 0, 0, 3, 0, 0, 0)
+shape = SubResource("BoxShape3D_brisa")
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="Box"]
+transform = Transform3D(3, 0, 0, 0, 3, 0, 0, 0, 3, 0, 0, 0)
+mesh = SubResource("BoxMesh_1o467")
+
+[node name="Player" type="CharacterBody3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.57051, 3.58723)
+script = SubResource("GDScript_l5o6l")
+
+[node name="Body" type="CollisionShape3D" parent="Player"]
+shape = SubResource("CapsuleShape3D_wlhci")
+
+[node name="Camera" type="Camera3D" parent="Player"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.678371, 0)
+
+[node name="GroundCheck" type="RayCast3D" parent="Player"]
+transform = Transform3D(0.5, 0, 0, 0, 0.5, 0, 0, 0, 0.5, 0, -0.8, 0)
+
+[node name="Wall" type="StaticBody3D" parent="."]
+transform = Transform3D(5, 0, 0, 0, 5, 0, 0, 0, 5, 0, 12.5, -47.533)
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Wall"]
+shape = SubResource("BoxShape3D_8ydiv")
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="Wall"]
+mesh = SubResource("BoxMesh_lu2cy")
+
+[node name="Board" type="StaticBody3D" parent="."]
+transform = Transform3D(-4.37114e-08, 0, 1, 0, 1, 0, -1, 0, -4.37114e-08, -13, 5, 14)
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Board"]
+shape = SubResource("BoxShape3D_hkm5j")
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="Board"]
+mesh = SubResource("BoxMesh_f6yps")
+
+[node name="Board2" type="StaticBody3D" parent="."]
+transform = Transform3D(-4.37114e-08, 0, 1, 0, 1, 0, -1, 0, -4.37114e-08, -20, 5, 14)
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Board2"]
+shape = SubResource("BoxShape3D_hkm5j")
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="Board2"]
+mesh = SubResource("BoxMesh_f6yps")
+
+[node name="Board3" type="StaticBody3D" parent="."]
+transform = Transform3D(-2, 3.86948e-08, -2.1354e-07, -1.65584e-07, 1, 1.73205, 1.40281e-07, 1.73205, -1, 17, 4, 19)
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Board3"]
+shape = SubResource("BoxShape3D_hkm5j")
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="Board3"]
+mesh = SubResource("BoxMesh_f6yps")
+
+[node name="Board4" type="StaticBody3D" parent="."]
+transform = Transform3D(2.44148e-07, 0.776457, -2.89778, 6.58878e-08, 2.89778, 0.776457, 3, -1.26833e-07, 2.18776e-07, 47, 4, 0)
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Board4"]
+shape = SubResource("BoxShape3D_hkm5j")
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="Board4"]
+mesh = SubResource("BoxMesh_f6yps")
